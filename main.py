@@ -74,6 +74,7 @@ class QuoteItem:
     price: float
     change_pct: float
     unit: str = ""
+    hint: str = ""
 
 
 @dataclass
@@ -81,6 +82,7 @@ class MacroIndicator:
     name: str
     value: str
     reference: str = ""
+    hint: str = ""
 
 
 @dataclass
@@ -88,6 +90,7 @@ class EconomicEvent:
     time_brt: str
     country: str
     title: str
+    explanation: str = ""
     forecast: str = ""
     previous: str = ""
 
@@ -102,7 +105,7 @@ class DailyEconomyReport:
     high_impact_events: List[EconomicEvent]
 
 
-def _fetch_yahoo_quote(symbol: str, name: str, unit: str = "") -> Optional[QuoteItem]:
+def _fetch_yahoo_quote(symbol: str, name: str, unit: str = "", hint: str = "") -> Optional[QuoteItem]:
     encoded = urllib.parse.quote(symbol)
     url = f"https://query1.finance.yahoo.com/v8/finance/chart/{encoded}?range=5d&interval=1d"
     data = http_get_json(url) or http_get_json(
@@ -124,7 +127,7 @@ def _fetch_yahoo_quote(symbol: str, name: str, unit: str = "") -> Optional[Quote
                 result.get("meta", {}).get("chartPreviousClose") or last_close
             )
         change_pct = ((last_close - prev_close) / prev_close * 100.0) if prev_close else 0.0
-        return QuoteItem(name=name, symbol=symbol, price=last_close, change_pct=change_pct, unit=unit)
+        return QuoteItem(name=name, symbol=symbol, price=last_close, change_pct=change_pct, unit=unit, hint=hint)
     except Exception:
         return None
 
@@ -153,17 +156,22 @@ def fetch_fx_and_indices() -> tuple[List[QuoteItem], List[QuoteItem]]:
         if q:
             fx_list.append(q)
 
-    dxy = _fetch_yahoo_quote("DX-Y.NYB", "Índice DXY (Dólar Global)", "pts")
+    dxy = _fetch_yahoo_quote(
+        "DX-Y.NYB",
+        "Índice DXY",
+        "pts",
+        hint="força do dólar no mundo",
+    )
     if dxy:
         fx_list.append(dxy)
 
     indices_list: List[QuoteItem] = []
-    for sym, label, unit in [
-        ("^BVSP", "Ibovespa (BR)", "pts"),
-        ("^GSPC", "S&P 500 (EUA)", "pts"),
-        ("^IXIC", "Nasdaq (EUA)", "pts"),
+    for sym, label, unit, hint in [
+        ("^BVSP", "Ibovespa (BR)", "pts", "principal índice da Bolsa brasileira"),
+        ("^GSPC", "S&P 500 (EUA)", "pts", "500 maiores empresas dos EUA"),
+        ("^IXIC", "Nasdaq (EUA)", "pts", "bolsa de tecnologia dos EUA"),
     ]:
-        item = _fetch_yahoo_quote(sym, label, unit)
+        item = _fetch_yahoo_quote(sym, label, unit, hint=hint)
         if item:
             indices_list.append(item)
 
@@ -201,84 +209,195 @@ def fetch_rates_and_inflation() -> List[MacroIndicator]:
     indicators: List[MacroIndicator] = []
     br_rates = _fetch_brasilapi_rates()
 
-    # 1. Taxa Selic (Meta) - tenta BCB SGS 432 ou BrasilAPI
+    # 1. Taxa Selic (Meta)
     selic = _fetch_bcb_sgs_latest(432)
     if selic:
-        indicators.append(MacroIndicator(name="🇧🇷 Taxa Selic (Meta)", value=f"{selic[0]} a.a."))
+        indicators.append(
+            MacroIndicator(
+                name="🇧🇷 Taxa Selic (Meta)",
+                value=f"{selic[0]} a.a.",
+                hint="juros básicos da economia brasileira",
+            )
+        )
     elif "SELIC" in br_rates:
         val_str = f"{br_rates['SELIC']:.2f}%".replace(".", ",")
-        indicators.append(MacroIndicator(name="🇧🇷 Taxa Selic (Meta)", value=f"{val_str} a.a."))
+        indicators.append(
+            MacroIndicator(
+                name="🇧🇷 Taxa Selic (Meta)",
+                value=f"{val_str} a.a.",
+                hint="juros básicos da economia brasileira",
+            )
+        )
 
-    # 2. Taxa CDI / DI (BrasilAPI ou BCB SGS 4389)
+    # 2. Taxa CDI / DI
     if "CDI" in br_rates:
         val_str = f"{br_rates['CDI']:.2f}%".replace(".", ",")
-        indicators.append(MacroIndicator(name="🇧🇷 Taxa CDI (DI)", value=f"{val_str} a.a."))
+        indicators.append(
+            MacroIndicator(
+                name="🇧🇷 Taxa CDI (DI)",
+                value=f"{val_str} a.a.",
+                hint="rendimento base da renda fixa/bancos",
+            )
+        )
     else:
         cdi = _fetch_bcb_sgs_latest(4389)
         if cdi:
-            indicators.append(MacroIndicator(name="🇧🇷 Taxa CDI (DI)", value=f"{cdi[0]} a.a."))
+            indicators.append(
+                MacroIndicator(
+                    name="🇧🇷 Taxa CDI (DI)",
+                    value=f"{cdi[0]} a.a.",
+                    hint="rendimento base da renda fixa/bancos",
+                )
+            )
 
-    # 3. IPCA Acumulado 12m (BCB SGS 13522 ou BrasilAPI)
+    # 3. IPCA Acumulado 12m
     ipca_12m = _fetch_bcb_sgs_latest(13522)
     if ipca_12m:
         indicators.append(
-            MacroIndicator(name="🇧🇷 IPCA (Acum. 12m)", value=ipca_12m[0], reference=f"ref. {ipca_12m[1]}")
+            MacroIndicator(
+                name="🇧🇷 IPCA (Acum. 12m)",
+                value=ipca_12m[0],
+                reference=f"ref. {ipca_12m[1]}",
+                hint="inflação oficial do Brasil",
+            )
         )
     elif "IPCA" in br_rates:
         val_str = f"{br_rates['IPCA']:.2f}%".replace(".", ",")
-        indicators.append(MacroIndicator(name="🇧🇷 IPCA (Inflação)", value=f"{val_str} a.a."))
+        indicators.append(
+            MacroIndicator(
+                name="🇧🇷 IPCA (Acum. 12m)",
+                value=f"{val_str} a.a.",
+                hint="inflação oficial do Brasil",
+            )
+        )
 
-    # 4. Juros Curto Prazo EUA (T-Bill 13 semanas ^IRX - referência direta da taxa do Fed)
-    us_short = _fetch_yahoo_quote("^IRX", "Juros Curto Prazo EUA (Fed/T-Bill)", "%")
+    # 4. Juros Curto Prazo EUA (T-Bill 13 semanas ^IRX / Fed Funds)
+    us_short = _fetch_yahoo_quote("^IRX", "Juros Curto Prazo EUA", "%")
     if us_short:
         val_str = f"{us_short.price:.2f}% a.a.".replace(".", ",")
-        indicators.append(MacroIndicator(name="🇺🇸 Juros EUA (Curto Prazo/Fed)", value=val_str))
+        indicators.append(
+            MacroIndicator(
+                name="🇺🇸 Juros EUA (Fed / Curto Prazo)",
+                value=val_str,
+                hint="referência da taxa básica americana",
+            )
+        )
 
-    # 5. Treasury 10 Anos EUA (^TNX - juros longos americanos)
+    # 5. Treasury 10 Anos EUA (^TNX)
     us10y = _fetch_yahoo_quote("^TNX", "Treasury 10 Anos (EUA)", "%")
     if us10y:
         sign = "+" if us10y.change_pct >= 0 else ""
         val_str = f"{us10y.price:.2f}% ({sign}{us10y.change_pct:.2f}%)".replace(".", ",")
-        indicators.append(MacroIndicator(name="🇺🇸 Treasury 10Y (Juros Longos EUA)", value=val_str))
+        indicators.append(
+            MacroIndicator(
+                name="🇺🇸 Treasury 10Y (EUA)",
+                value=val_str,
+                hint="juros dos títulos de 10 anos dos EUA; quando sobe, atrai dólar para lá",
+            )
+        )
 
     return indicators
 
 
 def fetch_commodities_and_crypto() -> List[QuoteItem]:
     results: List[QuoteItem] = []
-    for sym, label, unit in [
-        ("BZ=F", "Petróleo Brent", "US$"),
-        ("GC=F", "Ouro (Spot/Fut)", "US$"),
-        ("BTC-USD", "Bitcoin", "US$"),
+    for sym, label, unit, hint in [
+        ("BZ=F", "Petróleo Brent", "US$", "referência internacional do barril"),
+        ("GC=F", "Ouro", "US$", "ativo de proteção global"),
+        ("BTC-USD", "Bitcoin", "US$", "termômetro de liquidez em cripto"),
     ]:
-        item = _fetch_yahoo_quote(sym, label, unit)
+        item = _fetch_yahoo_quote(sym, label, unit, hint=hint)
         if item:
             results.append(item)
     return results
 
 
-_EVENT_TRANSLATIONS: Dict[str, str] = {
-    "Non-Farm Employment Change": "Payroll (Criação de Empregos)",
-    "Unemployment Rate": "Taxa de Desemprego",
-    "Average Hourly Earnings m/m": "Salário Médio por Hora (m/m)",
-    "CPI m/m": "Inflação CPI (m/m)",
-    "CPI y/y": "Inflação CPI (a/a)",
-    "Core CPI m/m": "Núcleo do CPI (m/m)",
-    "Core PCE Price Index m/m": "Inflação PCE (Favorita do Fed)",
-    "Federal Funds Rate": "Decisão de Juros do Fed (FOMC)",
-    "FOMC Statement": "Comunicado do FOMC (Fed)",
-    "FOMC Press Conference": "Coletiva de Jerome Powell (Fed)",
-    "FOMC Meeting Minutes": "Ata do FOMC (Fed)",
-    "Advance GDP q/q": "PIB dos EUA (Prévia t/t)",
-    "Prelim GDP q/q": "PIB dos EUA (Preliminar t/t)",
-    "Final GDP q/q": "PIB dos EUA (Final t/t)",
-    "Retail Sales m/m": "Vendas no Varejo (m/m)",
-    "ISM Manufacturing PMI": "PMI Industrial ISM",
-    "ISM Services PMI": "PMI de Serviços ISM",
-    "Unemployment Claims": "Pedidos de Auxílio-Desemprego",
-    "JOLTS Job Openings": "Vagas Abertas (JOLTS)",
-    "PPI m/m": "Inflação ao Produtor PPI (m/m)",
-    "Main Refinancing Rate": "Decisão de Juros do BCE (Europa)",
+# Dicionário com (Nome Técnico + Tradução Simples, Explicação prática do impacto)
+_EVENT_DETAILS: Dict[str, tuple[str, str]] = {
+    "Non-Farm Employment Change": (
+        "Payroll — Criação de Empregos",
+        "vagas criadas no mês; se vier muito acima da expectativa, fortalece o dólar",
+    ),
+    "Unemployment Rate": (
+        "Unemployment Rate — Taxa de Desemprego",
+        "% de desempregados nos EUA; desemprego muito baixo mantém juros altos lá fora",
+    ),
+    "Average Hourly Earnings m/m": (
+        "Average Hourly Earnings (m/m) — Salário Médio por Hora",
+        "variação mensal dos salários; alta forte indica pressão de inflação nos EUA",
+    ),
+    "CPI m/m": (
+        "CPI (m/m) — Inflação ao Consumidor no Mês",
+        "inflação mensal nos EUA; se vier alta, pressiona o dólar para cima",
+    ),
+    "CPI y/y": (
+        "CPI (a/a) — Inflação ao Consumidor em 12 Meses",
+        "inflação acumulada em 1 ano nos EUA; principal termômetro para os juros do Fed",
+    ),
+    "Core CPI m/m": (
+        "Core CPI (m/m) — Núcleo da Inflação Mensal",
+        "inflação sem alimentos e energia; mostra a tendência real dos preços nos EUA",
+    ),
+    "Core PCE Price Index m/m": (
+        "Core PCE (m/m) — Inflação Favorita do Fed",
+        "índice de preços mais acompanhado pelo Banco Central dos EUA para decidir juros",
+    ),
+    "Federal Funds Rate": (
+        "Fed Funds Rate — Decisão de Juros do Fed (FOMC)",
+        "define a taxa básica de juros dos EUA; impacta todas as moedas e bolsas do mundo",
+    ),
+    "FOMC Statement": (
+        "FOMC Statement — Comunicado Oficial do Fed",
+        "texto que indica se os juros nos EUA vão subir, cair ou ficar parados",
+    ),
+    "FOMC Press Conference": (
+        "FOMC Press Conference — Coletiva do Presidente do Fed",
+        "discurso ao vivo que costuma gerar forte oscilação no dólar e nas bolsas",
+    ),
+    "FOMC Meeting Minutes": (
+        "FOMC Minutes — Ata da Reunião do Fed",
+        "detalha os bastidores da última decisão de juros dos EUA",
+    ),
+    "Advance GDP q/q": (
+        "Advance GDP (t/t) — Prévia do PIB dos EUA",
+        "crescimento trimestral da economia americana",
+    ),
+    "Prelim GDP q/q": (
+        "Prelim GDP (t/t) — PIB Preliminar dos EUA",
+        "revisão do crescimento trimestral da economia americana",
+    ),
+    "Final GDP q/q": (
+        "Final GDP (t/t) — PIB Final dos EUA",
+        "dado consolidado do crescimento da economia americana no trimestre",
+    ),
+    "Retail Sales m/m": (
+        "Retail Sales (m/m) — Vendas no Varejo",
+        "mede a força do consumo das famílias no mês",
+    ),
+    "ISM Manufacturing PMI": (
+        "ISM Manufacturing PMI — Índice de Atividade Industrial",
+        "acima de 50 pontos indica expansão da indústria; abaixo de 50 indica retração",
+    ),
+    "ISM Services PMI": (
+        "ISM Services PMI — Índice do Setor de Serviços",
+        "mede o ritmo do maior setor da economia americana (acima de 50 = expansão)",
+    ),
+    "Unemployment Claims": (
+        "Unemployment Claims — Pedidos de Auxílio-Desemprego",
+        "termômetro semanal de demissões nos EUA",
+    ),
+    "JOLTS Job Openings": (
+        "JOLTS — Vagas de Trabalho Abertas",
+        "mede a demanda das empresas por trabalhadores nos EUA",
+    ),
+    "PPI m/m": (
+        "PPI (m/m) — Inflação ao Produtor no Atacado",
+        "mede o custo nas fábricas antes de chegar ao consumidor final",
+    ),
+    "Main Refinancing Rate": (
+        "Taxa de Juros do BCE (Banco Central Europeu)",
+        "decisão oficial de juros na Zona do Euro",
+    ),
 }
 
 _COUNTRY_FLAGS: Dict[str, str] = {
@@ -289,6 +408,17 @@ _COUNTRY_FLAGS: Dict[str, str] = {
     "JPY": "🇯🇵 Japão",
     "BRL": "🇧🇷 Brasil",
 }
+
+
+def _humanize_forecast(val: str) -> str:
+    """Mantém o valor técnico e traduz abreviações como K (mil) para ficar claro."""
+    v = val.strip()
+    if not v:
+        return ""
+    if v.upper().endswith("K"):
+        num = v[:-1].replace(".", ",")
+        return f"{v} = {num} mil"
+    return v.replace(".", ",")
 
 
 def fetch_high_impact_calendar(now_brt: dt.datetime) -> List[EconomicEvent]:
@@ -310,14 +440,18 @@ def fetch_high_impact_calendar(now_brt: dt.datetime) -> List[EconomicEvent]:
                 if ev_dt.date() != today_date:
                     continue
                 raw_title = str(ev.get("title", "")).strip()
-                title_pt = _EVENT_TRANSLATIONS.get(raw_title, raw_title)
+                title_pt, explanation = _EVENT_DETAILS.get(
+                    raw_title,
+                    (raw_title, "indicador macroeconômico de alto impacto nas moedas e bolsas"),
+                )
                 events.append(
                     EconomicEvent(
                         time_brt=ev_dt.strftime("%H:%M"),
                         country=_COUNTRY_FLAGS.get(country_code, country_code),
                         title=title_pt,
-                        forecast=str(ev.get("forecast", "") or ""),
-                        previous=str(ev.get("previous", "") or ""),
+                        explanation=explanation,
+                        forecast=_humanize_forecast(str(ev.get("forecast", "") or "")),
+                        previous=_humanize_forecast(str(ev.get("previous", "") or "")),
                     )
                 )
             except Exception:
@@ -329,7 +463,8 @@ def fetch_high_impact_calendar(now_brt: dt.datetime) -> List[EconomicEvent]:
             EconomicEvent(
                 time_brt="08:25",
                 country="🇧🇷 Brasil",
-                title="Divulgação do Boletim Focus (Banco Central)",
+                title="Boletim Focus (Banco Central)",
+                explanation="pesquisa semanal com as previsões do mercado para Selic, IPCA, PIB e Dólar",
             ),
         )
     events.sort(key=lambda e: e.time_brt)
@@ -380,7 +515,7 @@ def _build_deterministic_summary(report: DailyEconomyReport) -> str:
         parts.append(f"No câmbio, o dólar {direcao} a R$ {preco_str} ({var_str}).")
 
     if report.high_impact_events:
-        nomes = ", ".join(e.title for e in report.high_impact_events[:2])
+        nomes = ", ".join(e.title.split("—")[0].strip() for e in report.high_impact_events[:2])
         parts.append(f"Atenção hoje para a agenda de alto impacto: {nomes}.")
     else:
         parts.append("Agenda do dia sem divulgações macroeconômicas de alto impacto, mantendo o foco no fluxo global.")
@@ -406,7 +541,7 @@ def generate_market_summary(report: DailyEconomyReport) -> str:
         prompt = (
             "Você é um economista-chefe escrevendo o resumo matinal para WhatsApp.\n"
             "Com base APENAS nos dados abaixo, escreva um parágrafo curto de 2 a 3 linhas "
-            "(máximo 320 caracteres) em português claro e direto explicando o humor do mercado "
+            "(máximo 320 caracteres) em português claro, didático e direto explicando o humor do mercado "
             "e o que merece atenção hoje. Não use saudações nem listas.\n\n"
             f"Câmbio: {fx_txt}\nBolsas: {idx_txt}\nJuros/Inflação: {macro_txt}\n"
             f"Commodities/Cripto: {comm_txt}\nAgenda de Hoje: {events_txt}"
@@ -455,7 +590,8 @@ def _format_quote_line(q: QuoteItem) -> str:
         price_str = f"{_fmt_br_number(q.price, decimals)} pts"
     else:
         price_str = _fmt_br_number(q.price, 2)
-    return f"{icon} *{q.name}:* {price_str} ({pct_str})"
+    hint_str = f" — _{q.hint}_" if q.hint else ""
+    return f"{icon} *{q.name}:* {price_str} ({pct_str}){hint_str}"
 
 
 def format_whatsapp_message(report: DailyEconomyReport, market_summary: str) -> str:
@@ -475,8 +611,9 @@ def format_whatsapp_message(report: DailyEconomyReport, market_summary: str) -> 
     lines.append("")
     lines.append("🏦 *Juros & Inflação (BR / EUA)*")
     for m in report.rates_inflation:
-        ref = f" _{m.reference}_" if m.reference else ""
-        lines.append(f"• *{m.name}:* {m.value}{ref}")
+        ref = f" ({m.reference})" if m.reference else ""
+        hint_str = f" — _{m.hint}_" if m.hint else ""
+        lines.append(f"• *{m.name}:* {m.value}{ref}{hint_str}")
 
     lines.append("")
     lines.append("🛢️ *Commodities & Cripto*")
@@ -484,13 +621,16 @@ def format_whatsapp_message(report: DailyEconomyReport, market_summary: str) -> 
         lines.append(_format_quote_line(q))
 
     lines.append("")
-    lines.append("📅 *Agenda do Dia (Alto Impacto)*")
+    lines.append("📅 *Agenda do Dia (Eventos que Mexem no Mercado)*")
     if report.high_impact_events:
         for ev in report.high_impact_events:
-            extra = f" _(Proj: {ev.forecast})_" if ev.forecast else ""
-            lines.append(f"⏰ *{ev.time_brt}* | {ev.country}: {ev.title}{extra}")
+            proj = f" | *Projeção:* {ev.forecast}" if ev.forecast else ""
+            ant = f" | *Anterior:* {ev.previous}" if ev.previous else ""
+            lines.append(f"⏰ *{ev.time_brt}* | {ev.country}: *{ev.title}*{proj}{ant}")
+            if ev.explanation:
+                lines.append(f"   ↳ _O que é: {ev.explanation}._")
     else:
-        lines.append("• Sem divulgações críticas (3⭐) previstas para hoje.")
+        lines.append("• Sem divulgações críticas previstas para hoje (mercado segue fluxo técnico e notícias).")
     return "\n".join(lines)
 
 
