@@ -183,19 +183,64 @@ def _fetch_bcb_sgs_latest(series_code: int) -> Optional[tuple[str, str]]:
     return None
 
 
+def _fetch_brasilapi_rates() -> Dict[str, float]:
+    """Busca Selic, CDI e IPCA via BrasilAPI (funciona globalmente no GitHub Actions sem bloqueio)."""
+    data = http_get_json("https://brasilapi.com.br/api/taxas/v1")
+    result: Dict[str, float] = {}
+    if isinstance(data, list):
+        for item in data:
+            if isinstance(item, dict) and "nome" in item and "valor" in item:
+                try:
+                    result[str(item["nome"]).strip().upper()] = float(item["valor"])
+                except Exception:
+                    pass
+    return result
+
+
 def fetch_rates_and_inflation() -> List[MacroIndicator]:
     indicators: List[MacroIndicator] = []
+    br_rates = _fetch_brasilapi_rates()
+
+    # 1. Taxa Selic (Meta) - tenta BCB SGS 432 ou BrasilAPI
     selic = _fetch_bcb_sgs_latest(432)
     if selic:
-        indicators.append(MacroIndicator(name="Taxa Selic (Meta)", value=f"{selic[0]} a.a."))
+        indicators.append(MacroIndicator(name="🇧🇷 Taxa Selic (Meta)", value=f"{selic[0]} a.a."))
+    elif "SELIC" in br_rates:
+        val_str = f"{br_rates['SELIC']:.2f}%".replace(".", ",")
+        indicators.append(MacroIndicator(name="🇧🇷 Taxa Selic (Meta)", value=f"{val_str} a.a."))
+
+    # 2. Taxa CDI / DI (BrasilAPI ou BCB SGS 4389)
+    if "CDI" in br_rates:
+        val_str = f"{br_rates['CDI']:.2f}%".replace(".", ",")
+        indicators.append(MacroIndicator(name="🇧🇷 Taxa CDI (DI)", value=f"{val_str} a.a."))
+    else:
+        cdi = _fetch_bcb_sgs_latest(4389)
+        if cdi:
+            indicators.append(MacroIndicator(name="🇧🇷 Taxa CDI (DI)", value=f"{cdi[0]} a.a."))
+
+    # 3. IPCA Acumulado 12m (BCB SGS 13522 ou BrasilAPI)
     ipca_12m = _fetch_bcb_sgs_latest(13522)
     if ipca_12m:
-        indicators.append(MacroIndicator(name="IPCA (Acum. 12m)", value=ipca_12m[0], reference=f"ref. {ipca_12m[1]}"))
+        indicators.append(
+            MacroIndicator(name="🇧🇷 IPCA (Acum. 12m)", value=ipca_12m[0], reference=f"ref. {ipca_12m[1]}")
+        )
+    elif "IPCA" in br_rates:
+        val_str = f"{br_rates['IPCA']:.2f}%".replace(".", ",")
+        indicators.append(MacroIndicator(name="🇧🇷 IPCA (Inflação)", value=f"{val_str} a.a."))
+
+    # 4. Juros Curto Prazo EUA (T-Bill 13 semanas ^IRX - referência direta da taxa do Fed)
+    us_short = _fetch_yahoo_quote("^IRX", "Juros Curto Prazo EUA (Fed/T-Bill)", "%")
+    if us_short:
+        val_str = f"{us_short.price:.2f}% a.a.".replace(".", ",")
+        indicators.append(MacroIndicator(name="🇺🇸 Juros EUA (Curto Prazo/Fed)", value=val_str))
+
+    # 5. Treasury 10 Anos EUA (^TNX - juros longos americanos)
     us10y = _fetch_yahoo_quote("^TNX", "Treasury 10 Anos (EUA)", "%")
     if us10y:
         sign = "+" if us10y.change_pct >= 0 else ""
         val_str = f"{us10y.price:.2f}% ({sign}{us10y.change_pct:.2f}%)".replace(".", ",")
-        indicators.append(MacroIndicator(name="Treasury 10Y (EUA)", value=val_str))
+        indicators.append(MacroIndicator(name="🇺🇸 Treasury 10Y (Juros Longos EUA)", value=val_str))
+
     return indicators
 
 
