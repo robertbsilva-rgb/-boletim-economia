@@ -274,11 +274,11 @@ def fetch_rates_and_inflation() -> List[MacroIndicator]:
     # 4. Juros Curto Prazo EUA (T-Bill 13 semanas ^IRX / Fed Funds)
     us_short = _fetch_yahoo_quote("^IRX", "Juros Curto Prazo EUA", "%")
     if us_short:
-        val_str = f"{us_short.price:.2f}% a.a.".replace(".", ",")
+        preco_fmt = f"{us_short.price:.2f}".replace(".", ",")
         indicators.append(
             MacroIndicator(
                 name="🇺🇸 Juros EUA (Fed / Curto Prazo)",
-                value=val_str,
+                value=f"{preco_fmt}% a.a.",
                 hint="referência da taxa básica americana",
             )
         )
@@ -341,6 +341,10 @@ _EVENT_DETAILS: Dict[str, tuple[str, str]] = {
     "Core PCE Price Index m/m": (
         "Core PCE (m/m) — Inflação Favorita do Fed",
         "índice de preços mais acompanhado pelo Banco Central dos EUA para decidir juros",
+    ),
+    "Core CPI y/y": (
+        "Core CPI (a/a) — Núcleo da Inflação em 12 Meses",
+        "inflação sem alimentos e energia acumulada em 1 ano; tendência de fundo dos preços nos EUA",
     ),
     "Federal Funds Rate": (
         "Fed Funds Rate — Decisão de Juros do Fed (FOMC)",
@@ -698,6 +702,329 @@ def send_whatsapp_message(message: str) -> bool:
     raise RuntimeError(f"Erro Green-API: {last_error}")
 
 
+# =====================================================================
+# RADAR DA AGENDA — envia mensagem curta quando sai o resultado de um evento
+# =====================================================================
+
+RADAR_STATE_FILE = pathlib.Path(__file__).resolve().parent / "radar_state.json"
+
+# Evento da agenda -> (série oficial do BLS, tipo de cálculo, defasagem em meses, "alta = dólar forte?")
+_BLS_SERIES: Dict[str, Tuple[str, str, int, bool]] = {
+    "Non-Farm Employment Change": ("CES0000000001", "diff_k", 1, True),
+    "Unemployment Rate": ("LNS14000000", "level_pct", 1, False),
+    "Average Hourly Earnings m/m": ("CES0500000003", "mom", 1, True),
+    "CPI m/m": ("CUSR0000SA0", "mom", 1, True),
+    "CPI y/y": ("CUUR0000SA0", "yoy", 1, True),
+    "Core CPI m/m": ("CUSR0000SA0L1E", "mom", 1, True),
+    "Core CPI y/y": ("CUUR0000SA0L1E", "yoy", 1, True),
+    "PPI m/m": ("WPSFD4", "mom", 1, True),
+    "JOLTS Job Openings": ("JTS000000000000000JOL", "level_m", 2, True),
+}
+
+FOCUS_TITLE = "__FOCUS__"
+
+
+@dataclass
+class RadarEvent:
+    key: str
+    raw_title: str
+    when: dt.datetime
+    country_code: str
+    forecast: str
+    previous: str
+
+
+def _load_radar_state() -> Dict[str, str]:
+    try:
+        return json.loads(RADAR_STATE_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _save_radar_state(state: Dict[str, str], now: dt.datetime) -> None:
+    limit = (now - dt.timedelta(days=10)).date().isoformat()
+    pruned = {k: v for k, v in state.items() if v >= limit}
+    RADAR_STATE_FILE.write_text(json.dumps(pruned, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _fetch_today_radar_events(now: dt.datetime) -> List[RadarEvent]:
+    today = now.date()
+    events: List[RadarEvent] = []
+    raw_events = http_get_json("https://nfs.faireconomy.media/ff_calendar_thisweek.json")
+    if isinstance(raw_events, list):
+        for ev in raw_events:
+            try:
+                if ev.get("impact") != "High":
+                    continue
+                country_code = ev.get("country", "")
+                if country_code not in ("USD", "EUR", "CNY", "BRL"):
+                    continue
+                when = dt.datetime.fromisoformat(ev["date"]).astimezone(BRT)
+                if when.date() != today:
+                    continue
+                title = str(ev.get("title", "")).strip()
+                events.append(
+                    RadarEvent(
+                        key=f"{when.isoformat()}|{title}",
+                        raw_title=title,
+                        when=when,
+                        country_code=country_code,
+                        forecast=str(ev.get("forecast", "") or ""),
+                        previous=str(ev.get("previous", "") or ""),
+                    )
+                )
+            except Exception:
+                continue
+
+    if today.weekday() == 0:
+        when = dt.datetime.combine(today, dt.time(8, 25), tzinfo=BRT)
+        events.append(RadarEvent(f"{when.isoformat()}|{FOCUS_TITLE}", FOCUS_TITLE, when, "BRL", "", ""))
+    return events
+
+
+def _fetch_bls_series(series_ids: List[str], now: dt.datetime) -> Dict[str, List[Tuple[int, int, float]]]:
+    """Retorna {serie: [(ano, mes, valor), ...]} do mais recente para o mais antigo."""
+    payload: Dict[str, Any] = {
+        "seriesid": series_ids,
+        "startyear": str(now.year - 2),
+        "endyear": str(now.year),
+    }
+    key = os.getenv("BLS_API_KEY", "").strip()
+    if key:
+        payload["registrationkey"] = key
+    status, body = http_request("POST", "https://api.bls.gov/publicAPI/v2/timeseries/data/", payload=payload, timeout=25)
+    result: Dict[str, List[Tuple[int, int, float]]] = {}
+    if status != 200:
+        print(f"⚠️ BLS indisponível ({status})")
+        return result
+    try:
+        for serie in json.loads(body)["Results"]["series"]:
+            rows: List[Tuple[int, int, float]] = []
+            for d in serie.get("data", []):
+                period = str(d.get("period", ""))
+                if not period.startswith("M") or period == "M13":
+                    continue
+                try:
+                    rows.append((int(d["year"]), int(period[1:]), float(d["value"])))
+                except ValueError:
+                    continue
+            rows.sort(reverse=True)
+            result[serie["seriesID"]] = rows
+    except Exception as exc:
+        print(f"⚠️ Erro ao ler BLS: {exc}")
+    return result
+
+
+def _parse_number(val: str) -> Optional[float]:
+    v = val.strip().replace("%", "").replace("K", "").replace("M", "").replace("B", "")
+    try:
+        return float(v)
+    except ValueError:
+        return None
+
+
+def _compute_bls_actual(kind: str, rows: List[Tuple[int, int, float]]) -> Optional[Tuple[float, str]]:
+    if len(rows) < 2:
+        return None
+    y0, m0, v0 = rows[0]
+    if kind == "diff_k":
+        x = round(v0 - rows[1][2])
+        return x, f"{x:.0f}K"
+    if kind == "level_pct":
+        return round(v0, 1), f"{v0:.1f}%"
+    if kind == "mom":
+        x = round((v0 / rows[1][2] - 1) * 100, 1)
+        return x, f"{x:.1f}%"
+    if kind == "yoy":
+        prev = next((v for (y, m, v) in rows if y == y0 - 1 and m == m0), None)
+        if prev is None:
+            return None
+        x = round((v0 / prev - 1) * 100, 1)
+        return x, f"{x:.1f}%"
+    if kind == "level_m":
+        x = round(v0 / 1000, 2)
+        return x, f"{x:.2f}M"
+    return None
+
+
+def _expected_ref(when: dt.datetime, lag: int) -> Tuple[int, int]:
+    idx = when.year * 12 + (when.month - 1) - lag
+    return idx // 12, idx % 12 + 1
+
+
+def _interpretation(actual: float, forecast: Optional[float], higher_is_strong_usd: bool) -> str:
+    if forecast is None:
+        return ""
+    if abs(actual - forecast) < 1e-9:
+        return "⚖️ Veio *EM LINHA* com a projeção → impacto tende a ser neutro."
+    above = actual > forecast
+    if above == higher_is_strong_usd:
+        tag = "ACIMA" if above else "ABAIXO"
+        return f"📈 Veio *{tag}* da projeção → tende a *fortalecer o dólar* e pressionar juros (ruim para bolsas)."
+    tag = "ACIMA" if above else "ABAIXO"
+    return f"📉 Veio *{tag}* da projeção → tende a *enfraquecer o dólar* e aliviar juros (bom para bolsas)."
+
+
+def _fmt_pct_br(v: float) -> str:
+    return f"{v:.2f}".replace(".", ",")
+
+
+def _build_focus_block(now: dt.datetime) -> Optional[str]:
+    """Busca o Boletim Focus na API Olinda do Banco Central e compara com a semana anterior."""
+    years = [now.year, now.year + 1]
+    filt = (
+        "(Indicador eq 'IPCA' or Indicador eq 'PIB Total' or Indicador eq 'Selic' or Indicador eq 'Câmbio')"
+        f" and baseCalculo eq 0 and (DataReferencia eq '{years[0]}' or DataReferencia eq '{years[1]}')"
+    )
+    query = urllib.parse.urlencode(
+        {
+            "$top": "200",
+            "$filter": filt,
+            "$orderby": "Data desc",
+            "$format": "json",
+            "$select": "Indicador,Data,DataReferencia,Mediana",
+        },
+        quote_via=urllib.parse.quote,
+    )
+    data = http_get_json(
+        f"https://olinda.bcb.gov.br/olinda/servico/Expectativas/versao/v1/odata/ExpectativasMercadoAnuais?{query}",
+        timeout=25,
+    )
+    if not isinstance(data, dict) or not data.get("value"):
+        return None
+
+    series: Dict[Tuple[str, str], List[Tuple[dt.date, float]]] = {}
+    for row in data["value"]:
+        try:
+            k = (row["Indicador"], str(row["DataReferencia"]))
+            series.setdefault(k, []).append((dt.date.fromisoformat(row["Data"]), float(row["Mediana"])))
+        except Exception:
+            continue
+
+    latest_date = max((d for rows in series.values() for d, _ in rows), default=None)
+    if latest_date is None or (now.date() - latest_date).days > 4:
+        return None  # Focus desta semana ainda não publicado
+
+    labels = [
+        ("IPCA", "IPCA (inflação)", "%"),
+        ("Selic", "Selic (fim do ano)", "%"),
+        ("PIB Total", "PIB (crescimento)", "%"),
+        ("Câmbio", "Dólar (fim do ano)", "R$"),
+    ]
+    lines = [f"*Boletim Focus — Previsões do mercado* _(dados de {latest_date.strftime('%d/%m')})_"]
+    for ind, label, unit in labels:
+        parts = []
+        for y in years:
+            rows = sorted(series.get((ind, str(y)), []), reverse=True)
+            if not rows:
+                continue
+            d0, v0 = rows[0]
+            week_ago = next((v for d, v in rows if (d0 - d).days >= 7), None)
+            arrow = ""
+            if week_ago is not None:
+                arrow = " 🔺" if v0 > week_ago + 1e-9 else (" 🔻" if v0 < week_ago - 1e-9 else " =")
+            val = f"R$ {_fmt_pct_br(v0)}" if unit == "R$" else f"{_fmt_pct_br(v0)}%"
+            parts.append(f"{y}: {val}{arrow}")
+        if parts:
+            lines.append(f"• *{label}:* " + " | ".join(parts))
+    lines.append("_🔺 subiu / 🔻 caiu / = estável em relação à semana anterior_")
+    lines.append(
+        "   ↳ _O que é: pesquisa semanal do Banco Central com economistas; "
+        "previsões de inflação subindo costumam indicar juros altos por mais tempo._"
+    )
+    return "\n".join(lines)
+
+
+def run_radar(now: dt.datetime, dry_run: bool) -> int:
+    state = _load_radar_state()
+    events = _fetch_today_radar_events(now)
+    due = [
+        e for e in events
+        if e.key not in state
+        and now >= e.when + dt.timedelta(minutes=5)
+        and now - e.when <= dt.timedelta(hours=4)
+    ]
+    if not due:
+        print("📡 Radar: nenhum evento novo para avisar agora.")
+        _save_radar_state(state, now)
+        return 0
+
+    needed = sorted({_BLS_SERIES[e.raw_title][0] for e in due if e.raw_title in _BLS_SERIES})
+    bls = _fetch_bls_series(needed, now) if needed else {}
+
+    blocks: Dict[str, List[str]] = {}
+    sent_keys: List[str] = []
+    for e in sorted(due, key=lambda x: x.when):
+        header = f"{e.when.strftime('%H:%M')} | {_COUNTRY_FLAGS.get(e.country_code, e.country_code)}"
+        late = now - e.when > dt.timedelta(hours=2)
+
+        if e.raw_title == FOCUS_TITLE:
+            block = _build_focus_block(now)
+            if block is None and not late:
+                continue  # tenta de novo na próxima rodada
+            blocks.setdefault(header, []).append(
+                block or "*Boletim Focus* — publicado hoje, mas a API do Banco Central ainda não atualizou."
+            )
+            sent_keys.append(e.key)
+            continue
+
+        title_pt, explanation = _EVENT_DETAILS.get(
+            e.raw_title, (e.raw_title, "indicador macroeconômico de alto impacto nas moedas e bolsas")
+        )
+        proj = f"🎯 *Projeção:* {_humanize_forecast(e.forecast)}" if e.forecast else ""
+        ant = f"*Anterior:* {_humanize_forecast(e.previous)}" if e.previous else ""
+        proj_line = " | ".join(p for p in (proj, ant) if p)
+
+        actual_line = ""
+        interp = ""
+        if e.raw_title in _BLS_SERIES:
+            sid, kind, lag, strong_usd = _BLS_SERIES[e.raw_title]
+            rows = bls.get(sid, [])
+            ready = bool(rows) and (rows[0][0], rows[0][1]) >= _expected_ref(e.when, lag)
+            if ready:
+                res = _compute_bls_actual(kind, rows)
+                if res:
+                    actual_val, actual_txt = res
+                    ref = f"{rows[0][1]:02d}/{rows[0][0]}"
+                    actual_line = f"✅ *Resultado:* {_humanize_forecast(actual_txt)} _(ref. {ref}, fonte: BLS)_"
+                    interp = _interpretation(actual_val, _parse_number(e.forecast), strong_usd)
+            if not actual_line and not late:
+                continue  # fonte oficial ainda não atualizou; tenta na próxima rodada
+
+        if not actual_line:
+            actual_line = "⏱️ *Divulgado agora* — confira o resultado em relação à projeção abaixo."
+
+        lines = [f"*{title_pt}*", actual_line]
+        if proj_line:
+            lines.append(proj_line)
+        if interp:
+            lines.append(interp)
+        lines.append(f"   ↳ _O que é: {explanation}._")
+        blocks.setdefault(header, []).append("\n".join(lines))
+        sent_keys.append(e.key)
+
+    if not blocks:
+        print("📡 Radar: eventos aguardando atualização da fonte oficial; nova tentativa na próxima rodada.")
+        _save_radar_state(state, now)
+        return 0
+
+    for header, items in blocks.items():
+        message = f"🔔 *RADAR DA AGENDA* — {header}\n\n" + "\n\n".join(items)
+        print("\n" + "=" * 60 + "\n" + message + "\n" + "=" * 60)
+        if not dry_run:
+            send_whatsapp_message(message)
+
+    if dry_run:
+        print("✅ Radar --dry-run concluído (nada enviado, memória não alterada).")
+        return 0
+
+    for k in sent_keys:
+        state[k] = now.date().isoformat()
+    _save_radar_state(state, now)
+    print(f"✅ Radar: {len(blocks)} alerta(s) enviado(s) para o WhatsApp.")
+    return 0
+
+
 def _load_env_file() -> None:
     env_path = pathlib.Path(__file__).resolve().parent / ".env"
     if not env_path.exists():
@@ -720,7 +1047,15 @@ def main() -> int:
 
     parser = argparse.ArgumentParser(description="Gera e envia o Boletim Econômico Diário para o WhatsApp.")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--radar",
+        action="store_true",
+        help="Modo Radar: envia alerta curto apenas quando sair o resultado de um evento da agenda.",
+    )
     args = parser.parse_args()
+
+    if args.radar:
+        return run_radar(dt.datetime.now(BRT), args.dry_run)
 
     print("⏳ Coletando indicadores econômicos nacionais e internacionais...")
     report = collect_daily_report()
