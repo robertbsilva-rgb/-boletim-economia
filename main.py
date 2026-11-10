@@ -680,26 +680,40 @@ def _resolve_brazil_chat_id(base_url: str, id_instance: str, api_token: str, pho
 def send_whatsapp_message(message: str) -> bool:
     id_instance = os.getenv("GREENAPI_ID_INSTANCE", "").strip()
     api_token = os.getenv("GREENAPI_API_TOKEN", "").strip()
-    phone = os.getenv("GREENAPI_PHONE", "").strip()
+    raw_phones = os.getenv("GREENAPI_PHONE", "").strip()
 
-    if not id_instance or not api_token or not phone:
+    if not id_instance or not api_token or not raw_phones:
         raise RuntimeError(
             "Configure GREENAPI_ID_INSTANCE, GREENAPI_API_TOKEN e GREENAPI_PHONE no .env ou nos Secrets do GitHub."
         )
 
+    # Permite múltiplos números separados por vírgula, ponto-e-vírgula ou espaço
+    phones = [p.strip() for p in raw_phones.replace(";", ",").split(",") if p.strip()]
+
     hosts = [_resolve_greenapi_host(id_instance), "https://api.green-api.com"]
-    last_error = ""
-    for base_url in dict.fromkeys(hosts):
-        try:
-            chat_id = _resolve_brazil_chat_id(base_url, id_instance, api_token, phone)
-            url = f"{base_url}/waInstance{id_instance}/sendMessage/{api_token}"
-            status, body = http_request("POST", url, payload={"chatId": chat_id, "message": message}, timeout=20)
-            if status == 200:
-                return True
-            last_error = f"({status}) {body[:250]}"
-        except Exception as exc:
-            last_error = str(exc)
-    raise RuntimeError(f"Erro Green-API: {last_error}")
+    success_count = 0
+
+    for phone in phones:
+        sent = False
+        last_error = ""
+        for base_url in dict.fromkeys(hosts):
+            try:
+                chat_id = _resolve_brazil_chat_id(base_url, id_instance, api_token, phone)
+                url = f"{base_url}/waInstance{id_instance}/sendMessage/{api_token}"
+                status, body = http_request("POST", url, payload={"chatId": chat_id, "message": message}, timeout=20)
+                if status == 200:
+                    sent = True
+                    success_count += 1
+                    break
+                last_error = f"({status}) {body[:250]}"
+            except Exception as exc:
+                last_error = str(exc)
+        if not sent:
+            print(f"⚠️ Falha ao enviar para o número {phone}: {last_error}")
+
+    if success_count == 0:
+        raise RuntimeError("Erro Green-API: não foi possível enviar para nenhum dos números informados.")
+    return True
 
 
 # =====================================================================
